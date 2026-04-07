@@ -78,14 +78,16 @@ export interface ContentMetrics {
 export interface StreamConfig {
   id: string
   name: string
-  host: string
-  path: string
-  api_port: number
-  metrics_port: number
-  rtsp_port: number
+  mediamtx_url: string
+  rtsp_url: string
+  probe_interval_seconds: number
   is_active: boolean
   created_at: string
   updated_at: string
+}
+
+export interface StreamWithProbe extends StreamConfig {
+  latest_probe: ProbeResult | null
 }
 
 export interface ProbeAlert {

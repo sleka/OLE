@@ -1,87 +1,131 @@
-import { createClient } from '@/lib/supabase/server';
-import { NextRequest, NextResponse } from 'next/server';
+﻿import { NextResponse } from 'next/server'
 
-// GET - Fetch all streams with their latest probe result
-export async function GET() {
+const PROM = process.env.PROMETHEUS_URL ?? ''
+const CF_ID = process.env.CF_ACCESS_CLIENT_ID ?? ''
+const CF_SECRET = process.env.CF_ACCESS_CLIENT_SECRET ?? ''
+
+const STREAMS = ['Rai_Italia_America', 'Rai_News_24', 'Rai_World_Premium']
+const REGIONS = [
+  { id: 'us', name: 'US Wowza', site: 'us-east', host: '172.16.22.13' },
+  { id: 'eu', name: 'EU Wowza', site: 'eu-west', host: '10.24.36.5' },
+]
+
+async function promQuery(query: string): Promise<any[]> {
   try {
-    const supabase = await createClient();
-
-    // Get all active streams
-    const { data: streams, error: streamsError } = await supabase
-      .from('stream_configs')
-      .select('*')
-      .eq('is_active', true)
-      .order('name');
-
-    if (streamsError) {
-      return NextResponse.json({ error: streamsError.message }, { status: 500 });
-    }
-
-    // Get latest probe for each stream
-    const streamsWithProbes = await Promise.all(
-      (streams || []).map(async (stream) => {
-        const { data: latestProbe } = await supabase
-          .from('probe_results')
-          .select('*')
-          .eq('stream_id', stream.id)
-          .order('created_at', { ascending: false })
-          .limit(1)
-          .single();
-
-        return {
-          ...stream,
-          latest_probe: latestProbe || null,
-        };
-      })
-    );
-
-    return NextResponse.json({ data: streamsWithProbes });
-  } catch (error) {
-    console.error('Streams API error:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+    const url = `${PROM}/api/v1/query?query=${encodeURIComponent(query)}`
+    const res = await fetch(url, {
+      cache: 'no-store',
+      headers: {
+        'CF-Access-Client-Id': CF_ID,
+        'CF-Access-Client-Secret': CF_SECRET,
+      },
+    })
+    const json = await res.json()
+    return json?.data?.result ?? []
+  } catch {
+    return []
   }
 }
 
-// POST - Create a new stream config
-export async function POST(request: NextRequest) {
+function findMetric(results: any[], labels: Record<string, string>): number | null {
+  const match = results.find((r) =>
+    Object.entries(labels).every(([k, v]) => r.metric[k] === v)
+  )
+  return match ? parseFloat(match.value[1]) : null
+}
+
+export async function GET() {
   try {
-    const body = await request.json();
-    const supabase = await createClient();
+    const [activeResults, bitrateResults, downtimeResults, srtRttResults, srtLossResults, bytesInResults] =
+      await Promise.all([
+        promQuery('wowza_stream_active'),
+        promQuery('wowza_stream_bitrate'),
+        promQuery('wowza_downtime_is_down'),
+        promQuery('avg by (region, stream) (srt_stats_rtt_ms)'),
+        promQuery('avg by (region, stream) (srt_stats_pkt_rcv_loss)'),
+        promQuery('wowza_vhost_bytes_in'),
+      ])
 
-    const { name, mediamtx_url, rtsp_url, probe_interval_seconds } = body;
+    const output = REGIONS.map((region) => {
+      const streams = STREAMS.map((streamName) => {
+        const labels = { region: region.id, stream: streamName }
+        const active = findMetric(activeResults, labels)
+        const bitrate = findMetric(bitrateResults, labels)
+        const isDown = findMetric(downtimeResults, { region: region.id, stream: streamName })
+        const rtt = findMetric(srtRttResults, { region: region.id })
+        const loss = findMetric(srtLossResults, { region: region.id })
 
-    if (!name || !mediamtx_url || !rtsp_url) {
-      return NextResponse.json(
-        { error: 'Missing required fields: name, mediamtx_url, rtsp_url' },
-        { status: 400 }
-      );
-    }
+        const status = active === 1 ? 'UP_HEALTHY' : 'DOWN_PLATFORM'
 
-    const { data, error } = await supabase
-      .from('stream_configs')
-      .insert({
-        name,
-        mediamtx_url,
-        rtsp_url,
-        probe_interval_seconds: probe_interval_seconds || 60,
-        is_active: true,
+        return {
+          name: streamName,
+          active: active === 1,
+          status,
+          bitrate: bitrate ?? 0,
+          is_down: isDown === 1,
+          srt_rtt_ms: rtt ?? 0,
+          srt_pkt_loss: loss ?? 0,
+        }
       })
-      .select()
-      .single();
 
-    if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
-    }
+      const bytesIn = findMetric(bytesInResults, { region: region.id })
+      const allDown = streams.every((s) => !s.active)
+      const anyDown = streams.some((s) => !s.active)
 
-    return NextResponse.json({ success: true, data });
+      const overallStatus = allDown
+        ? 'DOWN_PLATFORM'
+        : anyDown
+        ? 'UP_DEGRADED'
+        : 'UP_HEALTHY'
+
+      const checkedAt = Math.floor(Date.now() / 1000)
+
+      return {
+        id: region.id,
+        name: region.name,
+        mediamtx_url: region.host,
+        rtsp_url: '',
+        probe_interval_seconds: 30,
+        is_active: true,
+        created_at: '',
+        updated_at: '',
+        latest_probe: {
+          status: overallStatus,
+          summary:
+            overallStatus === 'UP_HEALTHY'
+              ? 'All streams active'
+              : overallStatus === 'UP_DEGRADED'
+              ? 'Some streams down'
+              : 'All streams down',
+          checked_at_epoch: checkedAt,
+          issues: streams.filter((s) => !s.active).map((s) => `${s.name} is down`),
+          platform: {
+            api_ok: true,
+            metrics_ok: true,
+            srt_publish_connected: streams.some((s) => s.active),
+            srt_bytes_received: bytesIn ?? 0,
+            srt_bytes_sent: 0,
+            srt_rtt_ms: streams[0]?.srt_rtt_ms ?? 0,
+          },
+          content: {
+            ffprobe_ok: streams.some((s) => s.active),
+            has_video: streams.some((s) => s.active),
+            has_audio: streams.some((s) => s.active),
+            video: streams.some((s) => s.active)
+              ? { fps: null, codec_name: null, width: null, height: null }
+              : null,
+            audio: streams.some((s) => s.active)
+              ? { codec_name: null, sample_rate: null, channels: null, channel_layout: null }
+              : null,
+          },
+          streams,
+        },
+      }
+    })
+
+    return NextResponse.json(output)
   } catch (error) {
-    console.error('Streams API error:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+    console.error('Streams API error:', error)
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
 }

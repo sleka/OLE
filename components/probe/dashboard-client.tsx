@@ -7,27 +7,27 @@ import { AlertsList } from './alerts-list'
 import { HistoryChart } from './history-chart'
 import { MetricsChart } from './metrics-chart'
 import { StatusBadge } from './status-badge'
-import type { ProbeResult, ProbeAlert } from '@/lib/types'
+import type { StreamWithProbe, ProbeAlert } from '@/lib/types'
 import { Activity, RefreshCw, Server, Sparkles } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 
 interface DashboardClientProps {
-  initialResults: ProbeResult[]
+  initialStreams: StreamWithProbe[]
   initialAlerts: ProbeAlert[]
 }
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json())
 
-export function DashboardClient({ initialResults, initialAlerts }: DashboardClientProps) {
+export function DashboardClient({ initialStreams, initialAlerts }: DashboardClientProps) {
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [isLoadingDemo, setIsLoadingDemo] = useState(false)
 
-  const { data: results, mutate: mutateResults } = useSWR<ProbeResult[]>(
-    '/api/probe',
+  const { data: streams, mutate: mutateStreams } = useSWR<StreamWithProbe[]>(
+    '/api/streams',
     fetcher,
     {
-      fallbackData: initialResults,
-      refreshInterval: 10000, // Auto-refresh every 10 seconds
+      fallbackData: initialStreams,
+      refreshInterval: 10000,
     }
   )
 
@@ -40,11 +40,9 @@ export function DashboardClient({ initialResults, initialAlerts }: DashboardClie
     }
   )
 
-  const latestResult = results?.[0]
-
   const handleRefresh = async () => {
     setIsRefreshing(true)
-    await Promise.all([mutateResults(), mutateAlerts()])
+    await Promise.all([mutateStreams(), mutateAlerts()])
     setIsRefreshing(false)
   }
 
@@ -60,22 +58,25 @@ export function DashboardClient({ initialResults, initialAlerts }: DashboardClie
   const handleLoadDemo = async () => {
     setIsLoadingDemo(true)
     await fetch('/api/demo', { method: 'POST' })
-    await Promise.all([mutateResults(), mutateAlerts()])
+    await Promise.all([mutateStreams(), mutateAlerts()])
     setIsLoadingDemo(false)
   }
 
-  // Calculate stats
+  const probeResults = streams?.flatMap((s) => (s.latest_probe ? [s.latest_probe] : [])) ?? []
+
   const stats = {
-    total: results?.length || 0,
-    healthy: results?.filter((r) => r.status === 'UP_HEALTHY').length || 0,
-    degraded: results?.filter((r) => r.status === 'UP_DEGRADED').length || 0,
-    down:
-      results?.filter(
-        (r) => r.status === 'DOWN_CONTENT' || r.status === 'DOWN_PLATFORM'
-      ).length || 0,
+    total: streams?.length ?? 0,
+    healthy: streams?.filter((s) => s.latest_probe?.status === 'UP_HEALTHY').length ?? 0,
+    degraded: streams?.filter((s) => s.latest_probe?.status === 'UP_DEGRADED').length ?? 0,
+    down: streams?.filter(
+      (s) =>
+        s.latest_probe?.status === 'DOWN_CONTENT' ||
+        s.latest_probe?.status === 'DOWN_PLATFORM'
+    ).length ?? 0,
   }
 
-  const unacknowledgedAlerts = alerts?.filter((a) => !a.acknowledged).length || 0
+  const unacknowledgedAlerts = alerts?.filter((a) => !a.acknowledged).length ?? 0
+  const primaryProbe = streams?.[0]?.latest_probe ?? null
 
   return (
     <div className="min-h-screen bg-background">
@@ -93,16 +94,14 @@ export function DashboardClient({ initialResults, initialAlerts }: DashboardClie
               </div>
             </div>
             <div className="flex items-center gap-4">
-              {latestResult && <StatusBadge status={latestResult.status} size="lg" />}
+              {primaryProbe && <StatusBadge status={primaryProbe.status} size="lg" />}
               <Button
                 variant="outline"
                 size="sm"
                 onClick={handleRefresh}
                 disabled={isRefreshing}
               >
-                <RefreshCw
-                  className={`h-4 w-4 mr-2 ${isRefreshing ? 'animate-spin' : ''}`}
-                />
+                <RefreshCw className={`h-4 w-4 mr-2 ${isRefreshing ? 'animate-spin' : ''}`} />
                 Refresh
               </Button>
             </div>
@@ -116,19 +115,11 @@ export function DashboardClient({ initialResults, initialAlerts }: DashboardClie
           <div className="flex items-center gap-6 text-sm">
             <StatItem
               icon={<Activity className="h-4 w-4" />}
-              label="Total Checks"
+              label="Total Streams"
               value={stats.total}
             />
-            <StatItem
-              label="Healthy"
-              value={stats.healthy}
-              color="text-emerald-400"
-            />
-            <StatItem
-              label="Degraded"
-              value={stats.degraded}
-              color="text-amber-400"
-            />
+            <StatItem label="Healthy" value={stats.healthy} color="text-emerald-400" />
+            <StatItem label="Degraded" value={stats.degraded} color="text-amber-400" />
             <StatItem label="Down" value={stats.down} color="text-red-400" />
             {unacknowledgedAlerts > 0 && (
               <div className="ml-auto flex items-center gap-2 text-red-400">
@@ -145,60 +136,45 @@ export function DashboardClient({ initialResults, initialAlerts }: DashboardClie
 
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
-        <div className="grid gap-6 lg:grid-cols-3">
-          {/* Left Column - Current Status & Chart */}
-          <div className="lg:col-span-2 space-y-6">
-            {latestResult ? (
-              <StreamCard result={latestResult} streamName="Primary Stream" />
-            ) : (
-              <div className="rounded-lg border border-border/50 bg-card/50 p-8 text-center">
-                <Server className="h-12 w-12 mx-auto mb-4 text-muted-foreground/50" />
-                <h3 className="text-lg font-medium text-foreground mb-2">
-                  No Probe Data
-                </h3>
-                <p className="text-sm text-muted-foreground mb-4">
-                  Start sending probe results from your EC2 instance to see data here.
-                </p>
-                <code className="block text-xs bg-secondary/50 rounded-lg p-4 text-left overflow-x-auto">
-                  {`curl -X POST ${typeof window !== 'undefined' ? window.location.origin : ''}/api/probe \\
-  -H "Content-Type: application/json" \\
-  -d @probe_result.json`}
-                </code>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={handleLoadDemo}
-                  disabled={isLoadingDemo}
-                  className="mt-4"
-                >
-                  <Sparkles className={`h-4 w-4 mr-2 ${isLoadingDemo ? 'animate-pulse' : ''}`} />
-                  {isLoadingDemo ? 'Loading...' : 'Load Demo Data'}
-                </Button>
+        {streams && streams.length > 0 ? (
+          <div className="grid gap-6 lg:grid-cols-3">
+            <div className="lg:col-span-2 space-y-6">
+              {streams.map((stream) => (
+                <StreamCard
+                  key={stream.id}
+                  result={stream.latest_probe}
+                  streamName={stream.name}
+                />
+              ))}
+              <HistoryChart results={probeResults} />
+              <div className="grid gap-6 sm:grid-cols-2">
+                <MetricsChart results={probeResults} metric="fps" title="Video FPS" />
+                <MetricsChart results={probeResults} metric="bytes" title="Bytes Received" />
               </div>
-            )}
-
-            <HistoryChart results={results || []} />
-
-            {/* Metrics Charts */}
-            <div className="grid gap-6 sm:grid-cols-2">
-              <MetricsChart
-                results={results || []}
-                metric="fps"
-                title="Video FPS"
-              />
-              <MetricsChart
-                results={results || []}
-                metric="bytes"
-                title="Bytes Received"
-              />
+            </div>
+            <div className="space-y-6">
+              <AlertsList alerts={alerts ?? []} onAcknowledge={handleAcknowledge} />
             </div>
           </div>
-
-          {/* Right Column - Alerts */}
-          <div className="space-y-6">
-            <AlertsList alerts={alerts || []} onAcknowledge={handleAcknowledge} />
+        ) : (
+          <div className="rounded-lg border border-border/50 bg-card/50 p-8 text-center">
+            <Server className="h-12 w-12 mx-auto mb-4 text-muted-foreground/50" />
+            <h3 className="text-lg font-medium text-foreground mb-2">No Streams Configured</h3>
+            <p className="text-sm text-muted-foreground mb-4">
+              Add stream configurations to start monitoring.
+            </p>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleLoadDemo}
+              disabled={isLoadingDemo}
+              className="mt-4"
+            >
+              <Sparkles className={`h-4 w-4 mr-2 ${isLoadingDemo ? 'animate-pulse' : ''}`} />
+              {isLoadingDemo ? 'Loading...' : 'Load Demo Data'}
+            </Button>
           </div>
-        </div>
+        )}
       </main>
     </div>
   )

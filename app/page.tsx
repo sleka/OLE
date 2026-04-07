@@ -1,31 +1,59 @@
-import { createClient } from '@/lib/supabase/server'
 import { DashboardClient } from '@/components/probe/dashboard-client'
-import type { ProbeResult, ProbeAlert } from '@/lib/types'
+import { createClient } from '@/lib/supabase/server'
+import type { StreamWithProbe, ProbeAlert } from '@/lib/types'
 
 export const dynamic = 'force-dynamic'
 export const revalidate = 0
 
+async function getDashboardData(): Promise<{
+  streams: StreamWithProbe[]
+  alerts: ProbeAlert[]
+}> {
+  try {
+    const supabase = await createClient()
+
+    const { data: streamConfigs } = await supabase
+      .from('stream_configs')
+      .select('*')
+      .eq('is_active', true)
+      .order('name')
+
+    const streamsWithProbes: StreamWithProbe[] = await Promise.all(
+      (streamConfigs || []).map(async (stream) => {
+        const { data: latestProbe } = await supabase
+          .from('probe_results')
+          .select('*')
+          .eq('stream_id', stream.id)
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .single()
+
+        return { ...stream, latest_probe: latestProbe || null }
+      })
+    )
+
+    const { data: alerts } = await supabase
+      .from('probe_alerts')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(50)
+
+    return {
+      streams: streamsWithProbes,
+      alerts: (alerts || []) as ProbeAlert[],
+    }
+  } catch {
+    return { streams: [], alerts: [] }
+  }
+}
+
 export default async function HomePage() {
-  const supabase = await createClient()
-
-  // Fetch latest probe results
-  const { data: results } = await supabase
-    .from('probe_results')
-    .select('*')
-    .order('created_at', { ascending: false })
-    .limit(100)
-
-  // Fetch active alerts
-  const { data: alerts } = await supabase
-    .from('probe_alerts')
-    .select('*')
-    .order('created_at', { ascending: false })
-    .limit(50)
+  const { streams, alerts } = await getDashboardData()
 
   return (
     <DashboardClient
-      initialResults={(results as ProbeResult[]) || []}
-      initialAlerts={(alerts as ProbeAlert[]) || []}
+      initialStreams={streams}
+      initialAlerts={alerts}
     />
   )
 }

@@ -3,10 +3,10 @@
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { StatusBadge } from './status-badge'
 import type { ProbeResult } from '@/lib/types'
-import { Activity, Tv, Volume2, Wifi, Clock } from 'lucide-react'
+import { Activity, Tv, Volume2, Wifi, Clock, ServerOff } from 'lucide-react'
 
 interface StreamCardProps {
-  result: ProbeResult
+  result: ProbeResult | null
   streamName?: string
 }
 
@@ -23,6 +23,24 @@ function formatTime(epoch: number): string {
 }
 
 export function StreamCard({ result, streamName }: StreamCardProps) {
+  if (!result) {
+    return (
+      <Card className="bg-card/50 border-border/50 backdrop-blur">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-lg font-semibold text-foreground">
+            {streamName || 'Stream Monitor'}
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-center gap-3 text-muted-foreground py-4">
+            <ServerOff className="h-5 w-5" />
+            <span className="text-sm">No probe data yet</span>
+          </div>
+        </CardContent>
+      </Card>
+    )
+  }
+
   const { status, summary, platform, content, checked_at_epoch, issues } = result
 
   return (
@@ -39,7 +57,6 @@ export function StreamCard({ result, streamName }: StreamCardProps) {
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
-        {/* Platform Metrics */}
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
           <MetricItem
             icon={<Wifi className="h-4 w-4" />}
@@ -65,19 +82,18 @@ export function StreamCard({ result, streamName }: StreamCardProps) {
           />
         </div>
 
-        {/* Content Metrics */}
         {content.video && (
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
             <MetricItem
               icon={<Tv className="h-4 w-4" />}
               label="Video"
-              value={`${content.video.codec_name?.toUpperCase() || 'N/A'}`}
+              value={content.video.codec_name?.toUpperCase() || 'N/A'}
               status={content.has_video}
             />
             <MetricItem
               icon={<Tv className="h-4 w-4" />}
               label="Resolution"
-              value={`${content.video.width}x${content.video.height}`}
+              value={`${content.video.width ?? '?'}x${content.video.height ?? '?'}`}
             />
             <MetricItem
               icon={<Activity className="h-4 w-4" />}
@@ -93,7 +109,6 @@ export function StreamCard({ result, streamName }: StreamCardProps) {
           </div>
         )}
 
-        {/* Issues */}
         {issues.length > 0 && (
           <div className="rounded-lg bg-red-500/10 border border-red-500/20 p-3">
             <h4 className="text-sm font-medium text-red-400 mb-2">Issues ({issues.length})</h4>
@@ -110,7 +125,6 @@ export function StreamCard({ result, streamName }: StreamCardProps) {
           </div>
         )}
 
-        {/* Timestamp */}
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <Clock className="h-3 w-3" />
           Last checked: {formatTime(checked_at_epoch)}
